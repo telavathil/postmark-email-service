@@ -1,3 +1,25 @@
-# .env
+# Binary files
+postmark-email-service
+postmark-service
+bootstrap
+*.exe
+
+# Lambda deployment files
+function.zip
+
+# Environment files
 .env
-.vscode
+
+# IDE files
+.idea/
+.vscode/
+
+# OS files
+.DS_Store
+*.swp
+*.swo
+
+# Go specific
+*.test
+*.out
+/vendor/

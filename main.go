@@ -5,9 +5,9 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"postmark-service/config"
-	"postmark-service/models"
-	"postmark-service/server"
+	"postmark-email-service/config"
+	"postmark-email-service/models"
+	"postmark-email-service/server"
 
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/keighl/postmark"

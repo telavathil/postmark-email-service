@@ -3,7 +3,7 @@ package server
 import (
 	"encoding/json"
 	"net/http"
-	"postmark-service/models"
+	"postmark-email-service/models"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/keighl/postmark"

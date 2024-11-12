@@ -1,4 +1,4 @@
-module postmark-service
+module postmark-email-service
 
 go 1.22
 
