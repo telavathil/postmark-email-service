@@ -5,14 +5,18 @@ import (
 	"github.com/keighl/postmark"
 )
 
+type PostmarkClient interface {
+	SendEmail(email postmark.Email) (postmark.EmailResponse, error)
+}
+
 type Server struct {
-	Validate *validator.Validate
-	Client   *postmark.Client
+	Client    PostmarkClient
+	Validate  *validator.Validate
 }
 
 func NewServer(postmarkToken string) *Server {
 	return &Server{
-		Validate: validator.New(),
-		Client:   postmark.NewClient(postmarkToken, ""),
+		Client:    postmark.NewClient(postmarkToken, ""),
+		Validate:  validator.New(),
 	}
 }

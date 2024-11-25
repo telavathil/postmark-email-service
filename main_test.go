@@ -1,20 +1,25 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
+	"postmark-email-service/config"
+	"postmark-email-service/models"
+	"postmark-email-service/server"
 	"testing"
 
-	"github.com/kataras/iris/v12"
-	"github.com/kataras/iris/v12/httptest"
+	"github.com/aws/aws-lambda-go/events"
 	"github.com/keighl/postmark"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestMain(m *testing.M) {
 	// Set up test environment
-	if os.Getenv("POSTMARK_SERVER_TOKEN") == "" {
-		os.Setenv("POSTMARK_SERVER_TOKEN", "test-token")
+	if os.Getenv("POSTMARK_TOKEN") == "" {
+		os.Setenv("POSTMARK_TOKEN", "test-token")
 	}
 
 	// Run tests
@@ -27,99 +32,37 @@ func TestMain(m *testing.M) {
 type mockPostmarkClient struct{}
 
 func (m *mockPostmarkClient) SendEmail(email postmark.Email) (postmark.EmailResponse, error) {
-	return postmark.EmailResponse{}, nil
+	return postmark.EmailResponse{
+		ErrorCode: 0,
+		Message:   "OK",
+		To:        email.To,
+	}, nil
 }
 
-func setupTestApp() *iris.Application {
-	app := iris.New()
-
-	// Use mock client instead of real Postmark client
-	client := &mockPostmarkClient{}
-
-	// Health check endpoint
-	app.Get("/health", func(ctx iris.Context) {
-		ctx.JSON(iris.Map{
-			"status": "healthy",
-		})
-	})
-
-	// Email sending endpoint
-	app.Post("/send-email", func(ctx iris.Context) {
-		var req EmailRequest
-		if err := ctx.ReadJSON(&req); err != nil {
-			ctx.StatusCode(iris.StatusBadRequest)
-			ctx.JSON(EmailResponse{
-				Success: false,
-				Message: "Invalid request body",
-			})
-			return
-		}
-
-		// Validate recipients
-		if len(req.To) == 0 {
-			ctx.StatusCode(iris.StatusBadRequest)
-			ctx.JSON(EmailResponse{
-				Success: false,
-				Message: "At least one recipient is required",
-			})
-			return
-		}
-
-		// Create Postmark email
-		email := postmark.Email{
-			From:     req.From,
-			To:       req.To[0],
-			Subject:  req.Subject,
-			HtmlBody: req.HtmlBody,
-			TextBody: req.TextBody,
-		}
-
-		// Send email
-		_, err := client.SendEmail(email)
-		if err != nil {
-			ctx.StatusCode(iris.StatusInternalServerError)
-			ctx.JSON(EmailResponse{
-				Success: false,
-				Message: "Failed to send email: " + err.Error(),
-			})
-			return
-		}
-
-		ctx.JSON(EmailResponse{
-			Success: true,
-			Message: "Email sent successfully",
-		})
-	})
-
-	return app
+func setupTestServer() *server.Server {
+	cfg := &config.Config{
+		PostmarkToken: "test-token",
+		Port:         "8080",
+	}
+	srv := server.NewServer(cfg.PostmarkToken)
+	srv.Client = &mockPostmarkClient{} // Use mock client
+	return srv
 }
 
-func TestHealthEndpoint(t *testing.T) {
-	app := setupTestApp()
-	e := httptest.New(t, app)
-
-	// Test health endpoint
-	e.GET("/health").
-		Expect().
-		Status(http.StatusOK).
-		JSON().Object().
-		ContainsKey("status").
-		HasValue("status", "healthy")
-}
-
-func TestSendEmailEndpoint(t *testing.T) {
-	app := setupTestApp()
-	e := httptest.New(t, app)
+func TestHTTPEndpoint(t *testing.T) {
+	srv := setupTestServer()
 
 	tests := []struct {
 		name           string
-		request        EmailRequest
+		method         string
+		request        models.EmailRequest
 		expectedStatus int
-		expectedBody   EmailResponse
+		expectedBody   models.EmailResponse
 	}{
 		{
-			name: "Valid email request",
-			request: EmailRequest{
+			name:   "Valid email request",
+			method: http.MethodPost,
+			request: models.EmailRequest{
 				From:     "test@example.com",
 				To:       []string{"recipient@example.com"},
 				Subject:  "Test Subject",
@@ -127,14 +70,15 @@ func TestSendEmailEndpoint(t *testing.T) {
 				TextBody: "Test body",
 			},
 			expectedStatus: http.StatusOK,
-			expectedBody: EmailResponse{
+			expectedBody: models.EmailResponse{
 				Success: true,
 				Message: "Email sent successfully",
 			},
 		},
 		{
-			name: "Empty recipient",
-			request: EmailRequest{
+			name:   "Empty recipient",
+			method: http.MethodPost,
+			request: models.EmailRequest{
 				From:     "test@example.com",
 				To:       []string{},
 				Subject:  "Test Subject",
@@ -142,46 +86,109 @@ func TestSendEmailEndpoint(t *testing.T) {
 				TextBody: "Test body",
 			},
 			expectedStatus: http.StatusBadRequest,
-			expectedBody: EmailResponse{
+			expectedBody: models.EmailResponse{
 				Success: false,
-				Message: "At least one recipient is required",
+				Message: "Key: 'EmailRequest.To' Error:Field validation for 'To' failed on the 'min' tag",
+			},
+		},
+		{
+			name:           "Invalid method",
+			method:         http.MethodGet,
+			request:        models.EmailRequest{},
+			expectedStatus: http.StatusMethodNotAllowed,
+			expectedBody: models.EmailResponse{
+				Success: false,
+				Message: "Method not allowed",
 			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			requestBody, _ := json.Marshal(tt.request)
+			var body []byte
+			var err error
+			if tt.method == http.MethodPost {
+				body, err = json.Marshal(tt.request)
+				assert.NoError(t, err)
+			}
 
-			e.POST("/send-email").
-				WithBytes(requestBody).
-				WithHeader("Content-Type", "application/json").
-				Expect().
-				Status(tt.expectedStatus).
-				JSON().Object().
-				ContainsKey("success").
-				ContainsKey("message").
-				HasValue("success", tt.expectedBody.Success).
-				HasValue("message", tt.expectedBody.Message)
+			req := httptest.NewRequest(tt.method, "/send-email", bytes.NewBuffer(body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+
+			srv.HandleHTTP(w, req)
+
+			assert.Equal(t, tt.expectedStatus, w.Code)
+
+			var response models.EmailResponse
+			err = json.NewDecoder(w.Body).Decode(&response)
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expectedBody.Success, response.Success)
+			assert.Equal(t, tt.expectedBody.Message, response.Message)
 		})
 	}
 }
 
-func TestInvalidJSONRequest(t *testing.T) {
-	app := setupTestApp()
-	e := httptest.New(t, app)
+func TestLambdaHandler(t *testing.T) {
+	srv := setupTestServer()
 
-	// Test invalid JSON request
-	invalidJSON := []byte(`{"invalid json"}`)
+	tests := []struct {
+		name           string
+		request        models.EmailRequest
+		expectedStatus int
+		expectedBody   models.EmailResponse
+	}{
+		{
+			name: "Valid email request",
+			request: models.EmailRequest{
+				From:     "test@example.com",
+				To:       []string{"recipient@example.com"},
+				Subject:  "Test Subject",
+				HtmlBody: "<p>Test body</p>",
+				TextBody: "Test body",
+			},
+			expectedStatus: 200,
+			expectedBody: models.EmailResponse{
+				Success: true,
+				Message: "Email sent successfully",
+			},
+		},
+		{
+			name: "Empty recipient",
+			request: models.EmailRequest{
+				From:     "test@example.com",
+				To:       []string{},
+				Subject:  "Test Subject",
+				HtmlBody: "<p>Test body</p>",
+				TextBody: "Test body",
+			},
+			expectedStatus: 400,
+			expectedBody: models.EmailResponse{
+				Success: false,
+				Message: "Key: 'EmailRequest.To' Error:Field validation for 'To' failed on the 'min' tag",
+			},
+		},
+	}
 
-	e.POST("/send-email").
-		WithBytes(invalidJSON).
-		WithHeader("Content-Type", "application/json").
-		Expect().
-		Status(http.StatusBadRequest).
-		JSON().Object().
-		ContainsKey("success").
-		ContainsKey("message").
-		HasValue("success", false).
-		HasValue("message", "Invalid request body")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, err := json.Marshal(tt.request)
+			assert.NoError(t, err)
+
+			event := events.APIGatewayProxyRequest{
+				HTTPMethod: "POST",
+				Body:      string(body),
+			}
+
+			response, err := srv.HandleRequest(event)
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expectedStatus, response.StatusCode)
+
+			var responseBody models.EmailResponse
+			err = json.Unmarshal([]byte(response.Body), &responseBody)
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expectedBody.Success, responseBody.Success)
+			assert.Equal(t, tt.expectedBody.Message, responseBody.Message)
+		})
+	}
 }
